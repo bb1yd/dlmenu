@@ -37,7 +37,7 @@ class ApiHelpersTest(unittest.TestCase):
             week_id = (params or {}).get("week_id")
             calls.append(week_id)
             if week_id not in mapping:
-                raise api.ApiError(f"week {week_id} not found")
+                raise api.ApiError(f"week {week_id} not found", code=11911)
             return {"title_date": mapping[week_id]}
 
         api._get = fake_get
@@ -55,6 +55,40 @@ class ApiHelpersTest(unittest.TestCase):
     def test_probe_week_stops_when_week_missing(self):
         self._patch_get({151: "2026.11.23-2026.11.29"})
         self.assertIsNone(api.probe_week(datetime.date(2026, 12, 20), self._fake_weeks()))
+
+    def test_probe_week_stops_when_passed_target_date(self):
+        calls = self._patch_get({151: "2026.11.23-2026.11.29", 152: "2026.11.30-2026.12.06"})
+        self.assertIsNone(api.probe_week(datetime.date(2026, 11, 18), self._fake_weeks()))
+        self.assertEqual(calls, [150, 151])
+
+    def test_probe_week_propagates_network_error(self):
+        original = api._get
+
+        def fail_get(path, params=None, timeout=15):
+            raise api.ApiError("网络请求失败: timeout")
+
+        api._get = fail_get
+        self.addCleanup(setattr, api, "_get", original)
+        with self.assertRaises(api.ApiError):
+            api.probe_week(datetime.date(2026, 11, 18), self._fake_weeks())
+
+    def test_probe_week_handles_unsorted_weeks(self):
+        weeks = [
+            {"id": 148, "school": "稻香湖", "title": "2026.11.02-2026.11.08",
+             "start": datetime.date(2026, 11, 2), "end": datetime.date(2026, 11, 8)},
+            {"id": 149, "school": "稻香湖", "title": "2026.11.09-2026.11.15",
+             "start": datetime.date(2026, 11, 9), "end": datetime.date(2026, 11, 15)},
+        ]
+        calls = self._patch_get({150: "2026.11.16-2026.11.22"})
+        self.assertIsNone(api.probe_week(datetime.date(2026, 11, 12), weeks))
+        self.assertEqual(calls, [])
+        week = api.probe_week(datetime.date(2026, 11, 18), weeks)
+        self.assertEqual(week["id"], 150)
+
+    def test_probe_newer_weeks(self):
+        self._patch_get({150: "2026.11.16-2026.11.22", 152: "2026.11.23-2026.11.29"})
+        newer = api.probe_newer_weeks(self._fake_weeks())
+        self.assertEqual([w["id"] for w in newer], [152, 150])
 
     def test_probe_week_tolerates_gapped_ids(self):
         # 历史 id 有跳号，150 不存在但 151 才是下一周

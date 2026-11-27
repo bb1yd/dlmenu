@@ -15,7 +15,9 @@ from constants import API_BASE, HEADERS, WEEKDAYS_CN, MEALS, DISH_TYPES, ALLERGE
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 CACHE_DIR = Path(os.environ.get("DLMENU_CACHE_DIR", Path.home() / ".dlmenu" / "cache"))
@@ -67,7 +69,7 @@ def _fetch(path, params, timeout, retries=3):
         except ValueError as e:
             raise ApiError("接口返回的不是 JSON") from e
     if body.get("code") != 200:
-        raise ApiError(body.get("message") or f"接口返回 code={body.get('code')}")
+        raise ApiError(body.get("message") or f"接口返回 code={body.get('code')}", code=body.get("code"))
     return body["data"]
 
 
@@ -121,39 +123,59 @@ def parse_title_date(text):
     return (start, end) if start <= end else None
 
 
-def probe_week(date, weeks=None, limit=None):
-    """周列表里查不到时，按 id 试探后面的周（是否真的存在以接口返回为准）。
-
-    正常情况只发 1 次请求；请求次数只跟“存在但没列出来的周数”有关，
-    跟周列表停更多久无关，最多 limit 次。
-    """
+def _iter_probed_weeks(weeks, limit=None):
+    """按 id 向上探测周列表之后已发布但未列入的周。"""
     limit = WEEK_PROBE_LIMIT if limit is None else limit
-    weeks = weeks if weeks is not None else list_weeks()
-    if not weeks or limit <= 0 or date <= weeks[0]["end"]:
-        return None
+    if not weeks or limit <= 0:
+        return
     last_id = max(w["id"] for w in weeks)
+    school = max(weeks, key=lambda w: w["end"]).get("school", "")
     misses = 0
     for step in range(1, limit + 1):
         week_id = last_id + step
         try:
-            data = _get("api/info/canteen_item_list",
-                        {"page": 1, "page_size": 1, "week_id": week_id,
-                         "week": WEEKDAYS_CN[0], "remark": "中学"})
-        except ApiError:
+            data = _get("api/info/canteen_item_list", {
+                "page": 1, "page_size": 150, "week_id": week_id,
+                "week": WEEKDAYS_CN[0], "remark": "中学",
+            })
+        except ApiError as e:
+            if e.code is None:
+                raise  # 网络/解析错误直接抛出，不误判为“周不存在”
             misses += 1
             if misses >= WEEK_PROBE_MISSES:
-                return None  # id 已经用尽，后面的周不会存在
+                return  # id 已经用尽，后面的周不会存在
             continue
         misses = 0
         rng = parse_title_date(data.get("title_date"))
         if not rng:
             continue
         start, end = rng
-        if start > date:
+        yield {"id": week_id, "school": school,
+               "title": data.get("title_date", ""), "start": start, "end": end}
+
+
+def probe_newer_weeks(weeks=None, limit=None):
+    """探测周列表之后所有已发布但未列入的周（按开始日期倒序）。"""
+    weeks = weeks if weeks is not None else list_weeks()
+    found = list(_iter_probed_weeks(weeks, limit=limit))
+    found.sort(key=lambda w: w["start"], reverse=True)
+    return found
+
+
+def probe_week(date, weeks=None, limit=None):
+    """周列表里查不到时，按 id 试探后面的周（是否真的存在以接口返回为准）。
+
+    正常情况只发 1 次请求；请求次数只跟“存在但没列出来的周数”有关，
+    跟周列表停更多久无关，最多 limit 次。
+    """
+    weeks = weeks if weeks is not None else list_weeks()
+    if not weeks or date <= max(w["end"] for w in weeks):
+        return None
+    for w in _iter_probed_weeks(weeks, limit=limit):
+        if w["start"] > date:
             return None  # 已经越过目标周，说明那一周确实没发布
-        if start <= date <= end:
-            return {"id": week_id, "school": weeks[0].get("school", ""),
-                    "title": data.get("title_date", ""), "start": start, "end": end}
+        if w["start"] <= date <= w["end"]:
+            return w
     return None
 
 

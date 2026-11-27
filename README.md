@@ -16,6 +16,8 @@ right away, or set `DLMENU_CACHE_TTL=0` to turn the cache off.
 
 The default school is 中学. Use `-S 小学` or set `DLMENU_SCHOOL=小学` for the primary-school menu.
 
+When the week list endpoint lags behind newly published menus, DLMenu probes subsequent week IDs up to `DLMENU_WEEK_PROBE` steps (default `26`; set to `0` to disable).
+
 ## MCP over stdio
 
 DLMenu can run as an MCP server for clients such as Claude Desktop:

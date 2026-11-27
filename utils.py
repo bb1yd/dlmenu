@@ -68,7 +68,8 @@ def resolve_date(args):
 
 def week_for(date):
     try:
-        week = find_week(date) or probe_week(date)
+        weeks = list_weeks()
+        week = find_week(date, weeks) or probe_week(date, weeks)
     except ApiError as e:
         die(str(e))
     if not week:
