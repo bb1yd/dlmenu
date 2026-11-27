@@ -1,7 +1,10 @@
 import datetime
 import os
+import shutil
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -79,6 +82,33 @@ class ApiHelpersTest(unittest.TestCase):
         calls = self._patch_get(mapping)
         self.assertIsNone(api.probe_week(datetime.date(2027, 6, 1), self._fake_weeks(), limit=3))
         self.assertEqual(calls, [150, 151, 152])
+
+    def test_fetch_does_not_retry_4xx(self):
+        resp = mock.Mock()
+        resp.raise_for_status.side_effect = api.requests.HTTPError(response=mock.Mock(status_code=404))
+        with mock.patch.object(api.requests, "get", return_value=resp) as get:
+            with self.assertRaises(api.NotFoundError):
+                api._fetch("api/info/canteen_item_list", {"week_id": 999}, 1)
+        self.assertEqual(get.call_count, 1)  # 4xx 不重试
+
+    def test_not_found_is_cached(self):
+        tmp = tempfile.mkdtemp(dir=os.getcwd())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.addCleanup(setattr, api, "CACHE_DIR", api.CACHE_DIR)
+        self.addCleanup(setattr, api, "CACHE_TTL", api.CACHE_TTL)
+        api.CACHE_DIR = api.Path(tmp)
+        api.CACHE_TTL = 1800
+        calls = []
+
+        def fake_fetch(path, params, timeout):
+            calls.append(params)
+            raise api.NotFoundError("接口返回 HTTP 404")
+
+        with mock.patch.object(api, "_fetch", fake_fetch):
+            for _ in range(2):
+                with self.assertRaises(api.NotFoundError):
+                    api._get("api/info/canteen_item_list", {"week_id": 999})
+        self.assertEqual(len(calls), 1)  # 第二次直接命中负缓存
 
     def test_flatten_skips_placeholders(self):
         grouped = [{"row": [{"name_sc": "米饭"}, {"name_sc": "空占位"}]}, {"row": [{"name_sc": "馒头"}]}]

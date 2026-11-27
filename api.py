@@ -18,8 +18,13 @@ class ApiError(RuntimeError):
     pass
 
 
+class NotFoundError(ApiError):
+    """id 不存在之类的确定性错误：重试和重新请求都没有意义，可以缓存。"""
+
+
 CACHE_DIR = Path(os.environ.get("DLMENU_CACHE_DIR", Path.home() / ".dlmenu" / "cache"))
 CACHE_TTL = int(os.environ.get("DLMENU_CACHE_TTL", "1800"))  # 秒，设为 0 关闭缓存
+_ERROR_KEY = "__dlmenu_error__"
 
 
 def _cache_path(path, params):
@@ -27,15 +32,33 @@ def _cache_path(path, params):
     return CACHE_DIR / f"{key}.json"
 
 
+def _fresh(cp):
+    return CACHE_TTL > 0 and cp.is_file() and time.time() - cp.stat().st_mtime < CACHE_TTL
+
+
 def _get(path, params=None, timeout=15):
     params = params or {}
     cp = _cache_path(path, params)
-    if CACHE_TTL > 0 and cp.is_file() and time.time() - cp.stat().st_mtime < CACHE_TTL:
+    if _fresh(cp):
         try:
-            return json.loads(cp.read_text("utf-8"))
+            cached = json.loads(cp.read_text("utf-8"))
         except (OSError, ValueError):
-            pass
-    data = _fetch(path, params, timeout)
+            cached = None
+        if isinstance(cached, dict) and _ERROR_KEY in cached:
+            raise NotFoundError(cached[_ERROR_KEY])
+        if cached is not None:
+            return cached
+    try:
+        data = _fetch(path, params, timeout)
+    except NotFoundError as e:
+        # 记住“这个 id 不存在”，免得每次探测都重新打一遍 404
+        if CACHE_TTL > 0:
+            try:
+                CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                cp.write_text(json.dumps({_ERROR_KEY: str(e)}, ensure_ascii=False), "utf-8")
+            except OSError:
+                pass
+        raise
     if CACHE_TTL > 0:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -60,6 +83,14 @@ def _fetch(path, params, timeout, retries=3):
             resp.raise_for_status()
             body = resp.json()
             break
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", 0)
+            if 400 <= code < 500 and code != 429:
+                # 4xx 重试也不会变好（探测周 id 时 404 是常态），直接放弃
+                raise NotFoundError(f"接口返回 HTTP {code}") from e
+            if attempt == retries - 1:
+                raise ApiError(f"网络请求失败: {e}") from e
+            time.sleep(0.8 * (attempt + 1))
         except requests.RequestException as e:
             if attempt == retries - 1:
                 raise ApiError(f"网络请求失败: {e}") from e
@@ -67,7 +98,10 @@ def _fetch(path, params, timeout, retries=3):
         except ValueError as e:
             raise ApiError("接口返回的不是 JSON") from e
     if body.get("code") != 200:
-        raise ApiError(body.get("message") or f"接口返回 code={body.get('code')}")
+        msg = body.get("message") or f"接口返回 code={body.get('code')}"
+        if body.get("code") in (404, 11911):
+            raise NotFoundError(msg)
+        raise ApiError(msg)
     return body["data"]
 
 
